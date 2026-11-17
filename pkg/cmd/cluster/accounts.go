@@ -89,6 +89,8 @@ var (
 		kbcli cluster change-password CLUSTERNAME
 		# change the default MongoDB root password and update its Secret
 		kbcli cluster change-password CLUSTERNAME --password PASSWD
+		# change the default MySQL root or Redis default password and update its Secret
+		kbcli cluster change-password CLUSTERNAME --password PASSWD
 		# change an application role password with explicit Secrets
 		kbcli cluster change-password CLUSTERNAME --component COMPNAME --name USERNAME --password PASSWD --secret TARGET_SECRET --auth-secret ADMIN_SECRET
 		# change a password on a specified instance

@@ -8,7 +8,7 @@ it under the terms of the GNU Affero General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
+This program is distributed in the hope that it will be useful
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU Affero General Public License for more details.
@@ -19,25 +19,49 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package accounts
 
-import "strings"
+import (
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+)
 
 type postgresPasswordChanger struct {
 	config passwordChangerConfig
 }
 
 func (c *postgresPasswordChanger) ChangePassword(request passwordChangeRequest) error {
-	command := []string{
-		"env",
-		"PGPASSWORD=" + request.AuthPassword,
-		"psql",
-		"-X",
-		"-v", "ON_ERROR_STOP=1",
-		"-h", "127.0.0.1",
-		"-U", request.AuthUser,
-		"-d", c.config.Database,
+	if c.config.ExecutionMode == passwordExecutionModeExec {
+		command := []string{
+			"env",
+			"PGPASSWORD=" + request.AuthPassword,
+			"psql",
+			"-X",
+			"-v", "ON_ERROR_STOP=1",
+			"-h", "127.0.0.1",
+			"-U", request.AuthUser,
+			"-d", c.config.Database,
+		}
+		return executePasswordCommand(c.config, request.PodName, command,
+			strings.NewReader(buildPostgresPasswordSQL(request.TargetUser, request.NewPassword)), true, "psql")
 	}
-	return executePasswordCommand(c.config, request.PodName, command,
-		strings.NewReader(buildPostgresPasswordSQL(request.TargetUser, request.NewPassword)), true, "psql")
+
+	return runPasswordJob(c.config, passwordJobSpec{
+		command: []string{"psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", passwordJobScriptMountPath + "/script.sql"},
+		env: []corev1.EnvVar{
+			{Name: "PGHOST", Value: c.config.Pod.Status.PodIP},
+			{Name: "PGDATABASE", Value: c.config.Database},
+		},
+		script: []byte(buildPostgresPasswordSQL(request.TargetUser, request.NewPassword)),
+		secretData: map[string][]byte{
+			"username": []byte(request.AuthUser),
+			"password": []byte(request.AuthPassword),
+		},
+		secretEnv: []passwordJobSecretEnv{
+			{name: "PGUSER", key: "username"},
+			{name: "PGPASSWORD", key: "password"},
+		},
+		scriptName: "script.sql",
+	})
 }
 
 func buildPostgresPasswordSQL(role, password string) string {

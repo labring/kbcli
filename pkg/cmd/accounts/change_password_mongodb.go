@@ -20,15 +20,22 @@ import (
 )
 
 const (
-	mongoPasswordShellCommand = `if command -v mongosh >/dev/null 2>&1; then
+	mongoPasswordJobShellCommand = `if command -v mongosh >/dev/null 2>&1; then
+	exec mongosh --host "$MONGO_HOST" --port "$MONGO_PORT" --quiet ` + passwordJobScriptMountPath + `/script.js
+elif command -v mongo >/dev/null 2>&1; then
+	exec mongo --host "$MONGO_HOST" --port "$MONGO_PORT" --quiet ` + passwordJobScriptMountPath + `/script.js
+else
+	echo "neither mongosh nor mongo is installed" >&2
+	exit 127
+fi`
+	mongoPasswordExecShellCommand = `if command -v mongosh >/dev/null 2>&1; then
 	exec mongosh --host 127.0.0.1 --port 27017 --quiet
 elif command -v mongo >/dev/null 2>&1; then
 	exec mongo --host 127.0.0.1 --port 27017 --quiet
 else
 	echo "neither mongosh nor mongo is installed" >&2
 	exit 127
-fi
-`
+fi`
 	defaultMongoAccountRootSecretWaitTimeout = 30 * time.Second
 	mongoAccountRootSecretPollInterval       = time.Second
 )
@@ -43,9 +50,21 @@ func (c *mongoPasswordChanger) ChangePassword(request passwordChangeRequest) err
 		database = defaultMongoPasswordDatabase
 	}
 
-	command := []string{"sh", "-c", mongoPasswordShellCommand}
-	script := buildMongoPasswordScript(database, request.AuthUser, request.AuthPassword, request.TargetUser, request.NewPassword)
-	return executePasswordCommand(c.config, request.PodName, command, strings.NewReader(script), true, "MongoDB client")
+	if c.config.ExecutionMode == passwordExecutionModeExec {
+		command := []string{"sh", "-c", mongoPasswordExecShellCommand}
+		script := buildMongoPasswordScript(database, request.AuthUser, request.AuthPassword, request.TargetUser, request.NewPassword)
+		return executePasswordCommand(c.config, request.PodName, command, strings.NewReader(script), true, "MongoDB client")
+	}
+
+	return runPasswordJob(c.config, passwordJobSpec{
+		command: []string{"sh", "-c", mongoPasswordJobShellCommand},
+		env: []corev1.EnvVar{
+			{Name: "MONGO_HOST", Value: c.config.Pod.Status.PodIP},
+			{Name: "MONGO_PORT", Value: "27017"},
+		},
+		script:     []byte(buildMongoPasswordScript(database, request.AuthUser, request.AuthPassword, request.TargetUser, request.NewPassword)),
+		scriptName: "script.js",
+	})
 }
 
 func (o *ChangePasswordOptions) waitForMongoAccountRootSecret(targetSecret *corev1.Secret) error {
