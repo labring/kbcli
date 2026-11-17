@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -837,7 +838,7 @@ func TestMySQLPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 		AuthPassword:      "admin-password",
 		TargetUser:        "appuser",
 		TargetOldPassword: "target-old-secret",
-		NewPassword:       "new-password",
+		NewPassword:       "target-new-secret",
 	}); err != nil {
 		t.Fatalf("ChangePassword() error = %v", err)
 	}
@@ -852,10 +853,13 @@ func TestMySQLPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 		t.Fatalf("temporary MySQL Job command = %v, want a shell command that reads the mounted SQL script", command)
 	}
 	jobObject := string(mustMarshalJSON(t, job))
-	for _, password := range []string{"admin-password", "target-old-secret", "new-password"} {
+	for _, password := range []string{"admin-password", "target-old-secret"} {
 		if strings.Contains(jobObject, password) {
 			t.Fatalf("temporary Job contains plaintext password %q", password)
 		}
+	}
+	if strings.Contains(jobObject, "target-new-secret") {
+		t.Fatal("temporary Job contains the plaintext target password")
 	}
 
 	scriptSecret := createdPasswordSecret(t, client)
@@ -880,7 +884,15 @@ func TestRedisPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 	pod := passwordTestPod("redis-redis-0", "master", "redis")
 	pod.Namespace = "default"
 	pod.Status.PodIP = "10.0.0.11"
-	pod.Spec.Containers = []corev1.Container{{Name: "redis", Image: "redis:test"}}
+	pod.Spec.Containers = []corev1.Container{{
+		Name:  "redis",
+		Image: "redis:test",
+		Ports: []corev1.ContainerPort{{Name: "redis", ContainerPort: 6379}},
+	}}
+	replica := passwordTestPod("redis-redis-1", "secondary", "redis")
+	replica.Namespace = "default"
+	replica.Status.PodIP = "10.0.0.12"
+	replica.Spec.Containers = pod.Spec.Containers
 
 	changer, err := newPasswordChanger("redis", passwordChangerConfig{
 		Client:     client,
@@ -888,6 +900,7 @@ func TestRedisPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 		Database:   "0",
 		Container:  "redis",
 		Pod:        &pod,
+		Pods:       []*corev1.Pod{&pod, &replica},
 		Output:     io.Discard,
 		JobTimeout: time.Second,
 	})
@@ -900,7 +913,7 @@ func TestRedisPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 		AuthPassword:      "admin-password",
 		TargetUser:        "default",
 		TargetOldPassword: "target-old-secret",
-		NewPassword:       "new-password",
+		NewPassword:       "target-new-secret",
 	}); err != nil {
 		t.Fatalf("ChangePassword() error = %v", err)
 	}
@@ -910,12 +923,21 @@ func TestRedisPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 		t.Fatal("temporary password Job was not created")
 	}
 	command := job.Spec.Template.Spec.Containers[0].Command
-	if len(command) != 3 || command[0] != "sh" || command[1] != "-c" ||
-		!strings.Contains(command[2], "redis-cli") || !strings.Contains(command[2], "/change-password/password") {
-		t.Fatalf("temporary Redis Job command = %v, want a shell command that reads the mounted password", command)
+	if len(command) != 2 || command[0] != "sh" || command[1] != passwordJobScriptMountPath+"/rotate-acl.sh" {
+		t.Fatalf("temporary Redis Job command = %v, want the mounted ACL rotation script", command)
+	}
+	foundEndpoints := false
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "REDIS_ENDPOINTS" && env.Value == "10.0.0.11:6379,10.0.0.12:6379" {
+			foundEndpoints = true
+			break
+		}
+	}
+	if !foundEndpoints {
+		t.Fatal("temporary Redis Job does not target every Running Pod")
 	}
 	jobObject := string(mustMarshalJSON(t, job))
-	for _, password := range []string{"admin-password", "target-old-secret", "new-password"} {
+	for _, password := range []string{"admin-password", "target-old-secret", "target-new-secret"} {
 		if strings.Contains(jobObject, password) {
 			t.Fatalf("temporary Job contains plaintext password %q", password)
 		}
@@ -925,18 +947,45 @@ func TestRedisPasswordChangerUsesTemporaryJobWithoutExec(t *testing.T) {
 	if scriptSecret.Name != job.Name {
 		t.Fatalf("temporary Secret name = %q, want Job name %q", scriptSecret.Name, job.Name)
 	}
-	if string(scriptSecret.Data[passwordJobScriptKey]) != ">new-password" {
-		t.Fatalf("temporary Redis password rule = %q, want %q", scriptSecret.Data[passwordJobScriptKey], ">new-password")
+	script := string(scriptSecret.Data[passwordJobScriptKey])
+	for _, expected := range []string{"phase=add", "phase=remove", "ACL SAVE", "rollback()", "REDIS_ENDPOINTS"} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("temporary Redis ACL rotation script does not contain %q: %q", expected, script)
+		}
 	}
-	if string(scriptSecret.Data["auth-password"]) != "admin-password" || string(scriptSecret.Data["old-password"]) != "target-old-secret" {
-		t.Fatal("temporary Redis Secret does not contain authentication and rollback passwords")
+	if string(scriptSecret.Data["auth-password"]) != "admin-password" ||
+		string(scriptSecret.Data["old-password"]) != "target-old-secret" ||
+		string(scriptSecret.Data["new-password"]) != "target-new-secret" {
+		t.Fatal("temporary Redis Secret does not contain authentication and rotation passwords")
 	}
 	assertPasswordJobSecretEnv(t, job, "REDIS_USER", "auth-user")
 	assertPasswordJobSecretEnv(t, job, "REDISCLI_AUTH", "auth-password")
 	assertPasswordJobSecretEnv(t, job, "REDIS_TARGET_USER", "target-user")
 	assertPasswordJobSecretEnv(t, job, "REDIS_OLD_PASSWORD", "old-password")
+	assertPasswordJobSecretEnv(t, job, "REDIS_NEW_PASSWORD", "new-password")
 	assertNoPasswordExec(t, client)
 	assertTemporaryPasswordResourcesDeleted(t, client, job.Name)
+}
+
+func TestFindPasswordPodsReturnsAllRunningMatchingPods(t *testing.T) {
+	runningPrimary := passwordTestPod("pg-redis-0", "primary", "redis")
+	runningSecondary := passwordTestPod("pg-redis-1", "secondary", "redis")
+	otherComponent := passwordTestPod("pg-sentinel-0", "primary", "sentinel")
+	notRunning := passwordTestPod("pg-redis-2", "secondary", "redis")
+	for i, pod := range []*corev1.Pod{&runningPrimary, &runningSecondary, &otherComponent, &notRunning} {
+		pod.Namespace = "default"
+		pod.Status.PodIP = fmt.Sprintf("10.0.0.%d", i+1)
+	}
+	notRunning.Status.Phase = corev1.PodFailed
+	client := fake.NewSimpleClientset(&runningPrimary, &runningSecondary, &otherComponent, &notRunning)
+
+	got, err := findPasswordPods(context.Background(), client, "default", "pg", "redis")
+	if err != nil {
+		t.Fatalf("findPasswordPods() error = %v", err)
+	}
+	if len(got) != 2 || got[0].Name != runningPrimary.Name || got[1].Name != runningSecondary.Name {
+		t.Fatalf("findPasswordPods() = %v, want [%s %s]", got, runningPrimary.Name, runningSecondary.Name)
+	}
 }
 
 func TestPostgresPasswordChangerSupportsExecExecutor(t *testing.T) {
@@ -1082,6 +1131,7 @@ func TestRedisPasswordChangerSupportsExecExecutor(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	pod := passwordTestPod("redis-redis-0", "master", "redis")
 	pod.Namespace = "default"
+	pod.Status.PodIP = "10.0.0.11"
 	pod.Spec.Containers = []corev1.Container{{Name: "redis", Image: "redis:test"}}
 	executor := &recordingPasswordExecutor{}
 	changer, err := newPasswordChanger("redis", passwordChangerConfig{
@@ -1090,6 +1140,7 @@ func TestRedisPasswordChangerSupportsExecExecutor(t *testing.T) {
 		Database:      "0",
 		Container:     "redis",
 		Pod:           &pod,
+		Pods:          []*corev1.Pod{&pod},
 		Config:        &rest.Config{},
 		RESTClient:    passwordExecRESTClient(t),
 		Executor:      executor,
@@ -1116,9 +1167,10 @@ func TestRedisPasswordChangerSupportsExecExecutor(t *testing.T) {
 		t.Fatal("exec executor was not invoked")
 	}
 	assertExecQueryValue(t, executor.url, "container", "redis")
-	assertExecQueryValues(t, executor.url, "command", []string{"redis-cli", "--raw"})
-	if executor.stdin.String() != ">new-password" {
-		t.Fatalf("exec stdin = %q, want the new Redis password rule", executor.stdin.String())
+	assertExecQueryValues(t, executor.url, "command", []string{"env", "sh", "-s"})
+	if !strings.Contains(executor.stdin.String(), "ACL SAVE") ||
+		!strings.Contains(executor.stdin.String(), "phase=remove") {
+		t.Fatalf("exec stdin does not contain the Redis ACL rotation and persistence script: %q", executor.stdin.String())
 	}
 	assertNoPasswordJobResources(t, client)
 }

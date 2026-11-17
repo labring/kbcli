@@ -83,6 +83,7 @@ type ChangePasswordOptions struct {
 
 	targetSecret  *corev1.Secret
 	targetSecrets []*corev1.Secret
+	passwordPods  []*corev1.Pod
 	authSecret    *corev1.Secret
 	oldPassword   string
 	oldPasswords  map[string]string
@@ -147,14 +148,24 @@ func (o *ChangePasswordOptions) Complete() error {
 	}
 
 	ctx := context.Background()
+	pods, err := findPasswordPods(ctx, o.kube(), o.Namespace, o.ClusterName, o.ComponentName)
+	if err != nil {
+		return err
+	}
 	if !explicitInstance {
-		pod, err := findPasswordPod(ctx, o.kube(), o.Namespace, o.ClusterName, o.ComponentName)
+		pod, err := selectPasswordPod(pods, o.ClusterName, o.ComponentName)
 		if err != nil {
 			return err
 		}
 		o.Pod = pod
 		o.PodName = pod.Name
 		o.ExecOptions.Pod = pod
+	}
+	if isRedisCharacterType(o.CharType) {
+		o.passwordPods = make([]*corev1.Pod, 0, len(pods))
+		for i := range pods {
+			o.passwordPods = append(o.passwordPods, &pods[i])
+		}
 	}
 
 	if err := o.completeSecrets(ctx); err != nil {
@@ -249,6 +260,7 @@ func (o *ChangePasswordOptions) Run() error {
 			Database:      o.databaseName(),
 			Container:     o.ContainerName,
 			Pod:           o.Pod,
+			Pods:          o.passwordPods,
 			Config:        o.Config,
 			RESTClient:    o.Client.CoreV1().RESTClient(),
 			Executor:      o.Executor,
@@ -506,6 +518,7 @@ type passwordChangerConfig struct {
 	Database      string
 	Container     string
 	Pod           *corev1.Pod
+	Pods          []*corev1.Pod
 	Config        *rest.Config
 	RESTClient    rest.Interface
 	Executor      exec.RemoteExecutor
@@ -659,12 +672,21 @@ func findTargetPasswordSecrets(ctx context.Context, client kubernetes.Interface,
 	return targetSecrets, nil
 }
 
-func findPasswordPod(ctx context.Context, client kubernetes.Interface, namespace, cluster, component string) (*corev1.Pod, error) {
+func findPasswordPods(ctx context.Context, client kubernetes.Interface, namespace, cluster, component string) ([]corev1.Pod, error) {
 	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list Pods: %w", err)
 	}
-	return selectPasswordPod(list.Items, cluster, component)
+	pods := make([]corev1.Pod, 0, len(list.Items))
+	for i := range list.Items {
+		pod := list.Items[i]
+		if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" &&
+			passwordPodMatchesComponent(pod, cluster, component) {
+			pods = append(pods, pod)
+		}
+	}
+	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
+	return pods, nil
 }
 
 func selectPasswordPod(pods []corev1.Pod, cluster, component string) (*corev1.Pod, error) {
@@ -736,6 +758,10 @@ func isPrimaryPasswordPodRole(role string) bool {
 	return strings.EqualFold(role, "primary") ||
 		strings.EqualFold(role, "leader") ||
 		strings.EqualFold(role, "master")
+}
+
+func isRedisCharacterType(characterType string) bool {
+	return strings.EqualFold(characterType, "redis")
 }
 
 func databaseTypeName(characterType string) string {

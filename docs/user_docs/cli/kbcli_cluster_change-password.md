@@ -4,6 +4,13 @@ title: kbcli cluster change-password
 
 Change a database account password
 
+### Synopsis
+
+Change a database account password and update its related Secrets.
+For Redis, ACL state is local to each Pod; the ACL is rotated and saved on every
+Running Pod in the selected component. Use --restart to refresh in-Pod clients
+that still hold the previous default-account credential in their environment.
+
 ```
 kbcli cluster change-password [flags]
 ```

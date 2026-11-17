@@ -209,8 +209,12 @@ func NewRevokeOptions(f cmdutil.Factory, streams genericiooptions.IOStreams) *co
 func NewChangePasswordCmd(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Command {
 	o := accounts.NewChangePasswordOptions(f, streams)
 	cmd := &cobra.Command{
-		Use:               "change-password",
-		Short:             "Change a database account password",
+		Use:   "change-password",
+		Short: "Change a database account password",
+		Long: `Change a database account password and update its related Secrets.
+For Redis, ACL state is local to each Pod; the ACL is rotated and saved on every
+Running Pod in the selected component. Use --restart to refresh in-Pod clients
+that still hold the previous default-account credential in their environment.`,
 		Example:           changePasswordExamples,
 		ValidArgsFunction: util.ResourceNameCompletionFunc(f, types.ClusterGVR()),
 		Run: func(cmd *cobra.Command, args []string) {
