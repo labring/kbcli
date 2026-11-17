@@ -79,6 +79,7 @@ type ChangePasswordOptions struct {
 	AuthSecretName               string
 	AccountRootSecretWaitTimeout time.Duration
 	ExecutionMode                string
+	Restart                      bool
 
 	targetSecret  *corev1.Secret
 	targetSecrets []*corev1.Secret
@@ -108,6 +109,7 @@ func (o *ChangePasswordOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.AuthSecretName, "auth-secret", "", "Secret used for database login; defaults to the target Secret.")
 	cmd.Flags().DurationVar(&o.AccountRootSecretWaitTimeout, "account-root-secret-timeout", defaultMongoAccountRootSecretWaitTimeout, "Maximum time to wait for a MongoDB account-root Secret to be deleted and recreated.")
 	cmd.Flags().StringVar(&o.ExecutionMode, "executor", passwordExecutionModeJob, "Executor used to run the database command: job or exec. The exec mode requires pods/exec permission.")
+	cmd.Flags().BoolVar(&o.Restart, "restart", false, "Rolling restart the selected component after a successful password and Secret update.")
 	cmd.Flags().StringVar(&o.ContainerName, "container", "", "Container used to run the database command or whose image is used by the temporary password Job; defaults to the Pod's default container.")
 }
 
@@ -350,7 +352,21 @@ func (o *ChangePasswordOptions) Run() error {
 	if len(immutableSecrets) == 0 {
 		printer.Alert(o.Out, "The new password is stored in the target Secret(s).\n")
 	}
+
+	if o.Restart {
+		if err := o.restartComponentAfterPasswordChange(context.Background(), immutableSecrets); err != nil {
+			return fmt.Errorf("password changed, but component restart failed: %w", err)
+		}
+	} else if o.changedDefaultAccount() {
+		printer.Warning(o.Out,
+			"Existing Pods still have the old default-account password in their environment and in-Pod clients may fail when they reconnect. Restart the component to refresh its credentials:\n  kbcli cluster restart %s -n %s --components=%s --auto-approve\n",
+			o.ClusterName, o.Namespace, o.ComponentName)
+	}
 	return nil
+}
+
+func (o *ChangePasswordOptions) changedDefaultAccount() bool {
+	return strings.EqualFold(o.UserName, defaultPasswordUserForCharacterType(o.CharType))
 }
 
 func (o *ChangePasswordOptions) passwordTargetSecrets() []*corev1.Secret {

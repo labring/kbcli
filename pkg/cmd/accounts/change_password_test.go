@@ -44,6 +44,8 @@ import (
 
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
+
+	clitesting "github.com/apecloud/kbcli/pkg/testing"
 )
 
 func TestBuildPostgresPasswordSQL(t *testing.T) {
@@ -427,6 +429,93 @@ func TestWaitForMongoAccountRootSecretRecreatedTimesOut(t *testing.T) {
 
 func boolptr(value bool) *bool {
 	return &value
+}
+
+func TestChangePasswordRunWarnsForDefaultAccountWithoutRestart(t *testing.T) {
+	secret := passwordTestSecret("target", "postgres", "old-password")
+	client := fake.NewSimpleClientset(secret)
+	changer := &recordingPasswordChanger{}
+	o := newTestChangePasswordOptions(client, secret, changer)
+	o.CharType = "postgresql"
+	o.ClusterName = "pg"
+	o.UserName = "postgres"
+	o.ComponentName = "postgresql"
+	output := &strings.Builder{}
+	o.Out = output
+
+	if err := o.Run(); err != nil {
+		t.Fatalf("ChangePasswordOptions.Run() error = %v", err)
+	}
+	message := output.String()
+	if !strings.Contains(message, "old default-account password") ||
+		!strings.Contains(message, "kbcli cluster restart pg -n default --components=postgresql --auto-approve") {
+		t.Fatalf("Run() output = %q, want default-account restart warning", message)
+	}
+}
+
+func TestChangePasswordRunDoesNotWarnForApplicationAccount(t *testing.T) {
+	secret := passwordTestSecret("target", "appuser", "old-password")
+	client := fake.NewSimpleClientset(secret)
+	changer := &recordingPasswordChanger{}
+	o := newTestChangePasswordOptions(client, secret, changer)
+	o.CharType = "postgresql"
+	o.UserName = "appuser"
+	o.ComponentName = "postgresql"
+	output := &strings.Builder{}
+	o.Out = output
+
+	if err := o.Run(); err != nil {
+		t.Fatalf("ChangePasswordOptions.Run() error = %v", err)
+	}
+	if strings.Contains(output.String(), "old default-account password") {
+		t.Fatalf("Run() output = %q, unexpected default-account warning", output.String())
+	}
+}
+
+func TestChangePasswordRunRequiresDynamicClientForRestart(t *testing.T) {
+	secret := passwordTestSecret("target", "postgres", "old-password")
+	client := fake.NewSimpleClientset(secret)
+	o := newTestChangePasswordOptions(client, secret, &recordingPasswordChanger{})
+	o.Restart = true
+	o.Out = io.Discard
+	o.ErrOut = io.Discard
+
+	err := o.Run()
+	if err == nil || !strings.Contains(err.Error(), "restart option requires a Kubernetes dynamic client") {
+		t.Fatalf("ChangePasswordOptions.Run() error = %v, want dynamic client restart error", err)
+	}
+}
+
+func TestPasswordRestartOpsRequest(t *testing.T) {
+	opsRequest := passwordRestartOpsRequest("default", "pg", "postgresql")
+
+	if opsRequest.Namespace != "default" || opsRequest.Spec.ClusterName != "pg" {
+		t.Fatalf("restart OpsRequest target = %s/%s, want default/pg", opsRequest.Namespace, opsRequest.Spec.ClusterName)
+	}
+	if opsRequest.Spec.Type != appsv1alpha1.RestartType {
+		t.Fatalf("restart OpsRequest type = %q, want %q", opsRequest.Spec.Type, appsv1alpha1.RestartType)
+	}
+	restarts := opsRequest.Spec.RestartList
+	if len(restarts) != 1 || restarts[0].ComponentName != "postgresql" {
+		t.Fatalf("restart OpsRequest components = %v, want [postgresql]", restarts)
+	}
+}
+
+func TestCreateAndWaitForPasswordRestart(t *testing.T) {
+	succeeded := passwordRestartOpsRequest("default", "pg", "postgresql")
+	succeeded.Status.Phase = appsv1alpha1.OpsSucceedPhase
+	client := clitesting.FakeDynamicClient(succeeded)
+
+	created, err := createPasswordRestartOpsRequest(context.Background(), client, passwordRestartOpsRequest("default", "pg", "postgresql"))
+	if err != nil {
+		t.Fatalf("createPasswordRestartOpsRequest() error = %v", err)
+	}
+	if created.Name == "" {
+		t.Fatal("created restart OpsRequest has no name")
+	}
+	if err = waitForPasswordRestart(context.Background(), client, succeeded.Namespace, succeeded.Name, time.Second, time.Millisecond); err != nil {
+		t.Fatalf("waitForPasswordRestart() error = %v", err)
+	}
 }
 
 func TestChangePasswordRunRollsBackWhenSecretUpdateFails(t *testing.T) {

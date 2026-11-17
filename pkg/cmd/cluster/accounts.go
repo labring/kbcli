@@ -93,6 +93,8 @@ var (
 		kbcli cluster change-password CLUSTERNAME --password PASSWD
 		# change an application role password with explicit Secrets
 		kbcli cluster change-password CLUSTERNAME --component COMPNAME --name USERNAME --password PASSWD --secret TARGET_SECRET --auth-secret ADMIN_SECRET
+		# change a password and rolling restart the component afterwards
+		kbcli cluster change-password CLUSTERNAME --password PASSWD --restart
 		# change a password on a specified instance
 		kbcli cluster change-password --instance INSTANCE --name USERNAME --password PASSWD
  `)

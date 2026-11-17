@@ -19,6 +19,8 @@ kbcli cluster change-password [flags]
   kbcli cluster change-password CLUSTERNAME --password PASSWD
   # change an application role password with explicit Secrets
   kbcli cluster change-password CLUSTERNAME --component COMPNAME --name USERNAME --password PASSWD --secret TARGET_SECRET --auth-secret ADMIN_SECRET
+  # change a password and rolling restart the component afterwards
+  kbcli cluster change-password CLUSTERNAME --password PASSWD --restart
   # change a password on a specified instance
   kbcli cluster change-password --instance INSTANCE --name USERNAME --password PASSWD
 ```
@@ -36,6 +38,7 @@ kbcli cluster change-password [flags]
   -i, --instance string                        Specify the name of instance to be connected.
       --name string                            Specify the database account whose password should be changed. Defaults to postgres for PostgreSQL, root for MongoDB and MySQL, and default for Redis.
   -p, --password string                        Specify the new password; prompts interactively when omitted.
+      --restart                                Rolling restart the selected component after a successful password and Secret update.
       --secret string                          Secret to update; when omitted, all related account Secrets are detected and updated.
 ```
 
