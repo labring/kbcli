@@ -26,8 +26,13 @@ on:
 
 run-name: ref_name:${{ github.ref_name }} release_version:${{ inputs.VERSION }}
 
+permissions:
+  contents: write
+  pull-requests: write
+
 env:
-  GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+  GITHUB_TOKEN: ${{ github.repository == 'apecloud/kbcli' && secrets.PERSONAL_ACCESS_TOKEN || github.token }}
+  GH_TOKEN: ${{ github.token }}
   HELM_VERSION: v3.13.1
   CUR_BRANCH: ${{ vars.CURRENT_RELEASE_BRANCH }}
 
@@ -69,7 +74,6 @@ jobs:
               git commit -a -m "chore: auto update kbcli embed chart changes"
           fi
           echo file_changes=$FILE_CHANGES >> $GITHUB_OUTPUT
-          
           RELEASE_COMMIT="$(git rev-parse HEAD)"
           echo 'RELEASE_COMMIT='${RELEASE_COMMIT} >> $GITHUB_ENV
 
@@ -102,7 +106,7 @@ jobs:
 
   send-message:
     needs: [ release-tag ]
-    if: ${{ failure() || cancelled() }}
+    if: ${{ (failure() || cancelled()) && github.repository == 'apecloud/kbcli' }}
     uses: apecloud/apecloud-cd/.github/workflows/feishui-message.yml@v0.1.49
     with:
       TYPE: "2"
