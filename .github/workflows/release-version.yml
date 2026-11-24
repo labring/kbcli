@@ -4,72 +4,45 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'The version of release'
-        required: false
-        default: ''
-      content:
-        description: 'The request content'
-        required: false
-        default: ''
+        description: 'The GitHub release tag, such as v0.9.7-labring.1'
+        required: true
+        type: string
 
-run-name: ref_name:${{ github.ref_name }} release_version:${{ inputs.release_version }} ${{ inputs.content }}
+run-name: ref_name:${{ github.ref_name }} release_version:${{ inputs.release_version }}
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  get-version:
-    if: ${{ github.repository == 'apecloud/kbcli' }}
-    uses: apecloud/apecloud-cd/.github/workflows/get-version.yml@v0.1.50
-    with:
-      RELEASE_VERSION: "${{ inputs.release_version }}"
-      CONTENT: "${{ inputs.content }}"
-      APECD_REF: "v0.1.50"
-    secrets: inherit
-
-  get-version-fork:
-    if: ${{ github.repository != 'apecloud/kbcli' }}
+  resolve-release-version:
     runs-on: ubuntu-latest
     outputs:
       release-version: ${{ steps.version.outputs.release-version }}
     steps:
-      - name: Resolve fork release version
+      - name: Resolve release version
         id: version
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
-          if [[ -z "${RELEASE_VERSION}" || ! "${RELEASE_VERSION}" =~ ^v[0-9]+ ]]; then
-            echo "A fork release requires release_version to be an explicit tag such as v0.9.6-fork." >&2
+          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+ ]]; then
+            echo "release_version must be an explicit tag such as v0.9.7-labring.1." >&2
             exit 1
           fi
           echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
 
-  release-message:
-    if: ${{ github.repository == 'apecloud/kbcli' && needs.get-version.result == 'success' }}
-    needs: [ get-version ]
-    uses: apecloud/apecloud-cd/.github/workflows/feishui-message.yml@v0.1.50
-    with:
-      TYPE: "1"
-      VERSION: "${{ needs.get-version.outputs.release-version }}"
-      APECD_REF: "v0.1.50"
-    secrets: inherit
-
   release-tag:
-    if: ${{ !failure() && !cancelled() && ((github.repository == 'apecloud/kbcli' && needs.get-version.result == 'success') || (github.repository != 'apecloud/kbcli' && needs.get-version-fork.result == 'success')) }}
-    needs: [ get-version, get-version-fork ]
+    needs: [ resolve-release-version ]
     uses: ./.github/workflows/release-tag.yaml
     with:
-      VERSION: "${{ github.repository == 'apecloud/kbcli' && needs.get-version.outputs.release-version || needs.get-version-fork.outputs.release-version }}"
-      RELEASE_VERSION: "${{ inputs.release_version }}"
+      VERSION: "${{ needs.resolve-release-version.outputs.release-version }}"
     secrets: inherit
 
-  # A tag pushed with GITHUB_TOKEN does not trigger another workflow. Build the
-  # fork release directly after the reusable tag job completes.
-  release-kbcli-fork:
-    if: ${{ !failure() && !cancelled() && github.repository != 'apecloud/kbcli' && needs.release-tag.result == 'success' }}
-    needs: [ get-version-fork, release-tag ]
+  # Tag operations performed with GITHUB_TOKEN do not trigger another workflow.
+  # Build the GitHub release directly after the reusable tag job completes.
+  release-kbcli:
+    needs: [ resolve-release-version, release-tag ]
     uses: ./.github/workflows/release-kbcli.yml
     with:
-      TAG_NAME: "${{ needs.get-version-fork.outputs.release-version }}"
+      TAG_NAME: "${{ needs.resolve-release-version.outputs.release-version }}"
     secrets: inherit

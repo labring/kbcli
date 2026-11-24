@@ -1,28 +1,18 @@
-name: Releae Tag
+name: Release Tag
 
 on:
   workflow_dispatch:
     inputs:
       VERSION:
         description: 'The version of release'
-        required: false
-        default: ''
-      RELEASE_VERSION:
-        description: 'The version of release'
-        required: false
-        default: ''
+        required: true
+        type: string
   workflow_call:
     inputs:
       VERSION:
         description: 'The version of release'
-        required: false
+        required: true
         type: string
-        default: ''
-      RELEASE_VERSION:
-        description: 'The version of release'
-        required: false
-        type: string
-        default: ''
 
 run-name: ref_name:${{ github.ref_name }} release_version:${{ inputs.VERSION }}
 
@@ -31,10 +21,9 @@ permissions:
   pull-requests: write
 
 env:
-  GITHUB_TOKEN: ${{ github.repository == 'apecloud/kbcli' && secrets.PERSONAL_ACCESS_TOKEN || github.token }}
+  GITHUB_TOKEN: ${{ github.token }}
   GH_TOKEN: ${{ github.token }}
   HELM_VERSION: v3.13.1
-  CUR_BRANCH: ${{ vars.CURRENT_RELEASE_BRANCH }}
 
 jobs:
   release-tag:
@@ -45,16 +34,7 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      - name: checkout branch ${{ env.CUR_BRANCH }}
-        if: ${{ inputs.RELEASE_VERSION == '' && env.CUR_BRANCH != '' }}
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          ref: ${{ env.CUR_BRANCH }}
-          fetch-depth: 0
-
       - name: checkout branch ${{ github.ref_name }}
-        if: ${{ inputs.RELEASE_VERSION != '' || env.CUR_BRANCH == '' }}
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
@@ -73,9 +53,9 @@ jobs:
               git config --local user.email "$GITHUB_ACTOR@users.noreply.github.com"
               git commit -a -m "chore: auto update kbcli embed chart changes"
           fi
-          echo file_changes=$FILE_CHANGES >> $GITHUB_OUTPUT
+          echo file_changes=$FILE_CHANGES >> "$GITHUB_OUTPUT"
           RELEASE_COMMIT="$(git rev-parse HEAD)"
-          echo 'RELEASE_COMMIT='${RELEASE_COMMIT} >> $GITHUB_ENV
+          echo 'RELEASE_COMMIT='${RELEASE_COMMIT} >> "$GITHUB_ENV"
 
       - name: push kbcli embed chart changes to new branch
         if: ${{ steps.build-kbcli-embed-chart.outputs.file_changes && github.ref_name == 'main' }}
@@ -103,14 +83,3 @@ jobs:
           github_token: ${{ env.GITHUB_TOKEN }}
           commit_sha: ${{ env.RELEASE_COMMIT }}
           tag_prefix: ""
-
-  send-message:
-    needs: [ release-tag ]
-    if: ${{ (failure() || cancelled()) && github.repository == 'apecloud/kbcli' }}
-    uses: apecloud/apecloud-cd/.github/workflows/feishui-message.yml@v0.1.49
-    with:
-      TYPE: "2"
-      CONTENT: "release tag ${{ inputs.VERSION }} error"
-      APECD_REF: "v0.1.49"
-    secrets: inherit
-
